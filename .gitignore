@@ -1,0 +1,18 @@
+# Generated files
+test_disk.img
+*.img
+
+# Compiled binaries
+forensics.exe
+forensics
+*.o
+*.obj
+
+# Recovered files
+recovered/
+recovered_*.jpg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
