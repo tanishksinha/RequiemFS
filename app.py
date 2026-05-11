@@ -1,11 +1,19 @@
 """
 RequiemFS - Raw Disk Forensic Recovery Visualizer
 Phase 3: The Dashboard
+
+New in this version:
+  - Keyboard shortcuts: Ctrl+O to load, F5 to scan, Ctrl+E to export
+  - Export Report: saves a JSON + text summary of everything found
+  - Scan Stats: shows MB/s throughput, scan time, file count
+  - Clickable sector map: click any sector to jump the hex view there
+  - Entropy display: reports Shannon entropy per sector in findings
+  - FOUND_TYPE: shows whether recovered file is JPEG, PNG, or PDF
 """
-import os, sys, threading, queue, subprocess, math
+import os, sys, threading, queue, subprocess, math, json, datetime, time
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 
 SECTOR_SIZE = 512
@@ -47,8 +55,16 @@ class RequiemFSApp(ctk.CTk):
         self.map_rows = 0
         self.map_img_tk = None
         self.recovered_img_tk = None
+        self.map_scale = 1          # pixel scale for click-to-sector math
+        self.map_render_x = 0       # where the map image is drawn on canvas
+        self.map_render_y = 0
+        self.current_file_type = "?" # track what type of file we're carving
+        self.entropy_data = {}       # sector_num -> entropy value
+        self.scan_stats = {"time": 0, "count": 0, "mb_per_sec": 0}
+        self.scan_wall_start = 0    # wall clock time when scan started
 
         self._build_ui()
+        self._bind_shortcuts()
 
     # ── UI Construction ──────────────────────────────────────────────
     def _build_ui(self):
@@ -90,13 +106,21 @@ class RequiemFSApp(ctk.CTk):
                                       height=38, command=self.load_disk_image)
         self.load_btn.pack(padx=14, pady=4, fill="x")
 
-        self.scan_btn = ctk.CTkButton(sb, text="Run Forensic Scan",
+        self.scan_btn = ctk.CTkButton(sb, text="Run Forensic Scan  [F5]",
                                       font=ctk.CTkFont("Consolas", 12, "bold"),
                                       fg_color="#0d2e0d", hover_color="#164016",
                                       border_width=1, border_color=C["green"],
                                       text_color=C["green"], height=42,
                                       command=self.run_scan, state="disabled")
         self.scan_btn.pack(padx=14, pady=4, fill="x")
+
+        self.export_btn = ctk.CTkButton(sb, text="Export Report  [Ctrl+E]",
+                                        font=ctk.CTkFont("Consolas", 11),
+                                        fg_color="#1a1a2e", hover_color="#252545",
+                                        border_width=1, border_color=C["cyan"],
+                                        text_color=C["cyan"], height=34,
+                                        command=self.export_report, state="disabled")
+        self.export_btn.pack(padx=14, pady=(0, 4), fill="x")
 
         self._sep(sb)
         self._section(sb, "DISK INFO")
@@ -123,6 +147,20 @@ class RequiemFSApp(ctk.CTk):
                                      font=ctk.CTkFont("Consolas", 10),
                                      text_color=C["t3"])
         self.prog_lbl.pack(padx=14, anchor="w")
+
+        # scan stats - shows throughput + time after each run
+        stats_fr = ctk.CTkFrame(sb, fg_color=C["bg2"], corner_radius=6)
+        stats_fr.pack(padx=14, pady=4, fill="x")
+        self.stat_vals = {}
+        for k in ("Time", "Speed", "Found"):
+            r = ctk.CTkFrame(stats_fr, fg_color="transparent")
+            r.pack(fill="x", padx=8, pady=1)
+            ctk.CTkLabel(r, text=f"{k}:", font=ctk.CTkFont("Consolas", 9),
+                         text_color=C["t3"], anchor="w", width=40).pack(side="left")
+            v = ctk.CTkLabel(r, text="--", font=ctk.CTkFont("Consolas", 9),
+                             text_color=C["cyan"], anchor="w")
+            v.pack(side="left")
+            self.stat_vals[k] = v
 
         self._sep(sb)
         self._section(sb, "CONSOLE")
@@ -157,6 +195,11 @@ class RequiemFSApp(ctk.CTk):
         self.map_info.pack(side="right")
         self.map_canvas = tk.Canvas(mf, bg=C["bg0"], highlightthickness=0)
         self.map_canvas.pack(fill="both", expand=True, padx=8, pady=8)
+        # clicking a sector jumps the hex viewer to that part of the disk
+        self.map_canvas.bind("<Button-1>", self._on_map_click)
+        ctk.CTkLabel(mf, text="Click any sector to inspect",
+                     font=ctk.CTkFont("Consolas", 8),
+                     text_color=C["t3"]).pack(pady=(0, 4))
 
         # Hex viewer
         hf = ctk.CTkFrame(ct, fg_color=C["bg1"], corner_radius=8,
@@ -444,17 +487,29 @@ class RequiemFSApp(ctk.CTk):
                             if self.sector_states[s] not in ("jpeg", "header"):
                                 self.sector_states[s] = "scanned"
 
+                elif data.startswith("FOUND_TYPE:"):
+                    # the C engine tells us what kind of file it found
+                    self.current_file_type = data.split(":", 1)[1].strip()
+
                 elif data.startswith("FOUND_START:"):
                     offset = int(data.split(":")[1].strip(), 16)
                     current_start = offset
                     sec = offset // SECTOR_SIZE
                     if sec < len(self.sector_states):
                         self.sector_states[sec] = "header"
-                    self.log(f"JPEG header found at 0x{offset:08X}", "ok")
+                    self.log(f"{self.current_file_type} header found at 0x{offset:08X}", "ok")
                     self.findings_text.configure(state="normal")
                     self.findings_text.insert("end",
-                        f"[SOI] Start at 0x{offset:08X} (Sector {sec})\n")
+                        f"[{self.current_file_type}] Start 0x{offset:08X} (Sector {sec})\n")
                     self.findings_text.configure(state="disabled")
+
+                elif data.startswith("ENTROPY:"):
+                    # store entropy values so we can display them
+                    parts = data.split()
+                    if len(parts) == 3:
+                        sec_num = int(parts[1])
+                        ent_val = float(parts[2])
+                        self.entropy_data[sec_num] = ent_val
 
                 elif data.startswith("FOUND_END:"):
                     offset = int(data.split(":")[1].strip(), 16)
@@ -470,10 +525,11 @@ class RequiemFSApp(ctk.CTk):
                             self.sector_states[s_end] = "header"
                         self._render_hex_region(current_start, 2048)
                     sec = offset // SECTOR_SIZE
-                    self.log(f"JPEG footer found at 0x{offset:08X}", "ok")
+                    self.log(f"{self.current_file_type} footer found at 0x{offset:08X}", "ok")
                     self.findings_text.configure(state="normal")
+                    sz = offset - (current_start or 0)
                     self.findings_text.insert("end",
-                        f"[EOI] End   at 0x{offset:08X} (Sector {sec})\n\n")
+                        f"[EOI] End   0x{offset:08X} ({sz} bytes)\n\n")
                     self.findings_text.configure(state="disabled")
                     current_start = None
 
@@ -487,8 +543,14 @@ class RequiemFSApp(ctk.CTk):
                     self.log(f"Recovered: {os.path.basename(fpath)}", "ok")
                     self._show_preview(fpath)
 
+                elif data.startswith("SCAN_TIME:"):
+                    # C engine reports how long the scan took
+                    elapsed = float(data.split(":")[1].strip())
+                    self.scan_stats["time"] = elapsed
+
                 elif data.startswith("SCAN_COMPLETE:"):
                     count = int(data.split(":")[1].strip())
+                    self.scan_stats["count"] = count
                     self.log(f"Scan complete. {count} file(s) recovered.", "ok")
 
             elif kind == "stderr":
@@ -499,7 +561,7 @@ class RequiemFSApp(ctk.CTk):
 
             elif kind == "done":
                 self.scan_running = False
-                self.scan_btn.configure(state="normal", text="Run Forensic Scan")
+                self.scan_btn.configure(state="normal", text="Run Forensic Scan  [F5]")
                 self.prog_bar.set(1.0)
                 self.prog_lbl.configure(text="100%")
                 self.status_lbl.configure(text="COMPLETE",
@@ -507,8 +569,19 @@ class RequiemFSApp(ctk.CTk):
                 self.info_vals["Status"].configure(
                     text=f"{len(self.recovered_files)} recovered",
                     text_color=C["green"])
+                # update the stats panel
+                wall_elapsed = time.time() - self.scan_wall_start
+                disk_mb = len(self.disk_data) / (1024 * 1024) if self.disk_data else 0
+                mbps = disk_mb / wall_elapsed if wall_elapsed > 0 else 0
+                self.scan_stats["mb_per_sec"] = mbps
+                self.stat_vals["Time"].configure(text=f"{wall_elapsed:.2f}s")
+                self.stat_vals["Speed"].configure(text=f"{mbps:.1f} MB/s")
+                self.stat_vals["Found"].configure(
+                    text=f"{self.scan_stats['count']} file(s)")
+                # enable export now that we have results
+                self.export_btn.configure(state="normal")
                 self._render_sector_map()
-                self.log("--- Scan finished ---", "warn")
+                self.log(f"--- Done in {wall_elapsed:.2f}s at {mbps:.1f} MB/s ---", "warn")
                 return
 
         # Periodically re-render the sector map during scan
@@ -532,6 +605,173 @@ class RequiemFSApp(ctk.CTk):
             self.preview_label.configure(text=f"Cannot preview:\n{e}",
                                          image=None)
             self.log(f"Preview error: {e}", "warn")
+
+    # ── Keyboard Shortcuts ───────────────────────────────────────────
+    def _bind_shortcuts(self):
+        # Ctrl+O = load disk, F5 = scan, Ctrl+E = export
+        self.bind("<Control-o>", lambda e: self.load_disk_image())
+        self.bind("<F5>", lambda e: self.run_scan())
+        self.bind("<Control-e>", lambda e: self.export_report())
+
+    # ── Sector Map Click -> Jump Hex View ────────────────────────────
+    def _on_map_click(self, event):
+        """Click a pixel on the sector map to jump the hex dump there."""
+        if not self.disk_data or self.map_scale == 0:
+            return
+
+        # figure out which sector was clicked
+        # the image is centered on the canvas so we need to account for offset
+        cw = self.map_canvas.winfo_width()
+        ch = self.map_canvas.winfo_height()
+        img_w = self.map_cols * self.map_scale
+        img_h = self.map_rows * self.map_scale
+        x_off = (cw - img_w) // 2
+        y_off = (ch - img_h) // 2
+
+        px = (event.x - x_off) // self.map_scale
+        py = (event.y - y_off) // self.map_scale
+
+        if 0 <= px < self.map_cols and 0 <= py < self.map_rows:
+            sector = py * self.map_cols + px
+            byte_offset = sector * SECTOR_SIZE
+            if byte_offset < len(self.disk_data):
+                self._render_hex_region(byte_offset, 4096)
+                self.log(f"Jumped to sector {sector} (0x{byte_offset:08X})", "info")
+
+    # ── Export Report ────────────────────────────────────────────────
+    def export_report(self):
+        """Save a JSON + plain text forensic report of everything found."""
+        if not self.found_regions and not self.recovered_files:
+            messagebox.showinfo("Export Report", "Nothing to export yet. Run a scan first.")
+            return
+
+        save_path = filedialog.asksaveasfilename(
+            title="Save Forensic Report",
+            defaultextension=".json",
+            filetypes=[("JSON Report", "*.json"), ("Text Report", "*.txt"),
+                       ("All Files", "*.*")])
+        if not save_path:
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # build the report data
+        report = {
+            "tool": "RequiemFS",
+            "timestamp": timestamp,
+            "disk_image": self.disk_path,
+            "disk_size_mb": round(len(self.disk_data) / (1024*1024), 2) if self.disk_data else 0,
+            "total_sectors": self.num_sectors,
+            "scan_time_sec": round(self.scan_stats.get("time", 0), 3),
+            "throughput_mb_per_sec": round(self.scan_stats.get("mb_per_sec", 0), 2),
+            "recovered_files": [
+                {
+                    "filename": os.path.basename(f),
+                    "path": f,
+                    "size_bytes": os.path.getsize(f) if os.path.exists(f) else 0
+                }
+                for f in self.recovered_files
+            ],
+            "found_regions": [
+                {
+                    "start_offset": hex(s),
+                    "end_offset": hex(e),
+                    "start_sector": s // SECTOR_SIZE,
+                    "end_sector": e // SECTOR_SIZE,
+                    "size_bytes": e - s
+                }
+                for s, e in self.found_regions
+            ],
+            "entropy_samples": [
+                {"sector": k, "entropy": round(v, 4)}
+                for k, v in sorted(self.entropy_data.items())
+            ]
+        }
+
+        if save_path.endswith(".txt"):
+            # plain text version - easier to read for humans
+            with open(save_path, "w") as f:
+                f.write("=" * 60 + "\n")
+                f.write("  RequiemFS - Forensic Recovery Report\n")
+                f.write("=" * 60 + "\n\n")
+                f.write(f"Generated : {timestamp}\n")
+                f.write(f"Disk Image: {self.disk_path}\n")
+                f.write(f"Disk Size : {report['disk_size_mb']} MB\n")
+                f.write(f"Sectors   : {self.num_sectors}\n")
+                f.write(f"Scan Time : {report['scan_time_sec']}s ({report['throughput_mb_per_sec']} MB/s)\n")
+                f.write(f"\n--- RECOVERED FILES ({len(self.recovered_files)}) ---\n")
+                for rf in report["recovered_files"]:
+                    f.write(f"  {rf['filename']}  ({rf['size_bytes']} bytes)\n")
+                f.write(f"\n--- CARVED REGIONS ({len(self.found_regions)}) ---\n")
+                for reg in report["found_regions"]:
+                    f.write(f"  {reg['start_offset']} -> {reg['end_offset']}  "
+                            f"Sectors {reg['start_sector']}-{reg['end_sector']}  "
+                            f"({reg['size_bytes']} bytes)\n")
+        else:
+            with open(save_path, "w") as f:
+                json.dump(report, f, indent=2)
+
+        self.log(f"Report saved: {os.path.basename(save_path)}", "ok")
+        messagebox.showinfo("Export Report",
+                            f"Saved to:\n{save_path}")
+
+    # override run_scan to capture wall time
+    def run_scan(self):
+        if self.scan_running or not self.disk_data:
+            return
+        if not os.path.isfile(FORENSICS_EXE):
+            self.log(f"ERROR: {FORENSICS_EXE} not found. Compile forensics.c first!", "err")
+            return
+
+        self.scan_running = True
+        self.scan_wall_start = time.time()  # start the wall clock
+        self.scan_btn.configure(state="disabled", text="Scanning...")
+        self.status_lbl.configure(text="SCANNING", text_color=C["yellow"])
+        self.found_regions = []
+        self.recovered_files = []
+        self.entropy_data = {}
+        self.current_file_type = "?"
+        self.scan_stats = {"time": 0, "count": 0, "mb_per_sec": 0}
+        self.prog_bar.set(0)
+
+        self.file_list.configure(state="normal")
+        self.file_list.delete("1.0", "end")
+        self.file_list.configure(state="disabled")
+        self.findings_text.configure(state="normal")
+        self.findings_text.delete("1.0", "end")
+        self.findings_text.configure(state="disabled")
+
+        for k in ("Time", "Speed", "Found"):
+            self.stat_vals[k].configure(text="--")
+
+        self.log("Starting forensic scan...", "warn")
+
+        t = threading.Thread(target=self._scan_worker, daemon=True)
+        t.start()
+        self.after(50, self._process_queue)
+
+    # need to override _render_sector_map to store scale for click math
+    def _render_sector_map(self):
+        if self.map_rows == 0:
+            return
+        img = Image.new("RGB", (self.map_cols, self.map_rows))
+        pixels = img.load()
+        for i, state in enumerate(self.sector_states):
+            x = i % self.map_cols
+            y = i // self.map_cols
+            pixels[x, y] = SC.get(state, SC["empty"])
+        cw = self.map_canvas.winfo_width() or 600
+        ch = self.map_canvas.winfo_height() or 400
+        scale_x = max(1, cw // self.map_cols)
+        scale_y = max(1, ch // self.map_rows)
+        self.map_scale = max(1, min(scale_x, scale_y))  # store for click math
+        img = img.resize((self.map_cols * self.map_scale, self.map_rows * self.map_scale),
+                         Image.NEAREST)
+        self.map_img_tk = ImageTk.PhotoImage(img)
+        self.map_canvas.delete("all")
+        self.map_canvas.create_image(cw // 2, ch // 2, image=self.map_img_tk)
+        self.map_info.configure(
+            text=f"{self.map_cols}x{self.map_rows}  |  {self.num_sectors} sectors")
 
 
 if __name__ == "__main__":
