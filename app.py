@@ -110,6 +110,14 @@ class RequiemFSApp(ctk.CTk):
                                       height=38, command=self.load_disk_image)
         self.load_btn.pack(padx=14, pady=4, fill="x")
 
+        self.capture_btn = ctk.CTkButton(sb, text="Capture USB Drive",
+                                      font=ctk.CTkFont("Consolas", 11),
+                                      fg_color="#3a1c1c", hover_color="#5a2c2c",
+                                      border_width=1, border_color="#ff4444",
+                                      text_color="#ff4444", height=32,
+                                      command=self.open_capture_dialog)
+        self.capture_btn.pack(padx=14, pady=(0, 4), fill="x")
+
         self.scan_btn = ctk.CTkButton(sb, text="Run Forensic Scan  [F5]",
                                       font=ctk.CTkFont("Consolas", 12, "bold"),
                                       fg_color="#0d2e0d", hover_color="#164016",
@@ -422,11 +430,12 @@ class RequiemFSApp(ctk.CTk):
             text=f"Offset: 0x{start_offset:08X} - 0x{end:08X}")
 
     # ── Load Disk Image ──────────────────────────────────────────────
-    def load_disk_image(self):
-        path = filedialog.askopenfilename(
-            title="Select Raw Disk Image",
-            filetypes=[("Disk Images", "*.img *.raw *.dd *.bin"),
-                       ("All Files", "*.*")])
+    def load_disk_image(self, path=None):
+        if not path:
+            path = filedialog.askopenfilename(
+                title="Select Raw Disk Image",
+                filetypes=[("Disk Images", "*.img *.raw *.dd *.bin"),
+                           ("All Files", "*.*")])
         if not path:
             return
         self.log(f"Loading: {path}", "info")
@@ -693,6 +702,96 @@ class RequiemFSApp(ctk.CTk):
             
         except ValueError:
             self.log(f"Invalid offset: {val}", "err")
+
+    # ── Physical Drive Capture ───────────────────────────────────────
+    def open_capture_dialog(self):
+        try:
+            # use wmic to get physical drives on windows
+            out = subprocess.check_output(['wmic', 'diskdrive', 'get', 'DeviceID,Model,Size'], 
+                                          text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to list drives. Are you on Windows?\n{e}")
+            return
+            
+        lines = [line.strip() for line in out.split('\n') if line.strip()]
+        if len(lines) < 2:
+            messagebox.showerror("Error", "No drives found.")
+            return
+            
+        drives = []
+        for line in lines[1:]:
+            parts = line.split()
+            # wmic output varies, but usually DeviceID is \\.\PHYSICALDRIVEx
+            dev_id = [p for p in parts if p.startswith('\\\\.\\PHYSICALDRIVE')]
+            if dev_id:
+                drives.append(line)
+        
+        if not drives:
+            messagebox.showerror("Error", "No physical drives detected.")
+            return
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Capture Physical USB Drive")
+        dlg.geometry("500x250")
+        dlg.transient(self)
+        dlg.grab_set()
+        
+        ctk.CTkLabel(dlg, text="Select Drive (WARNING: Run as Admin required)", 
+                     text_color=C["yellow"]).pack(pady=10)
+                     
+        drive_var = ctk.StringVar(value=drives[0])
+        opt = ctk.CTkOptionMenu(dlg, variable=drive_var, values=drives, width=400)
+        opt.pack(pady=5)
+        
+        ctk.CTkLabel(dlg, text="Megabytes to Capture (Max 1024 for demo):").pack(pady=5)
+        mb_var = ctk.StringVar(value="200")
+        ctk.CTkEntry(dlg, textvariable=mb_var, width=100).pack()
+        
+        prog = ctk.CTkProgressBar(dlg, width=400)
+        prog.pack(pady=15)
+        prog.set(0)
+        
+        def start_capture():
+            try:
+                mb = int(mb_var.get())
+                dev_id = [p for p in drive_var.get().split() if p.startswith('\\\\.\\PHYSICALDRIVE')][0]
+            except:
+                return
+            
+            btn.configure(state="disabled", text="Capturing...")
+            t = threading.Thread(target=self._capture_worker, args=(dev_id, mb, dlg, prog), daemon=True)
+            t.start()
+            
+        btn = ctk.CTkButton(dlg, text="Start Capture", fg_color="#ff4444", hover_color="#aa2222", command=start_capture)
+        btn.pack(pady=5)
+
+    def _capture_worker(self, dev_id, mb, dlg, prog):
+        out_path = os.path.join(SCRIPT_DIR, "evidence.img")
+        try:
+            bytes_to_read = mb * 1024 * 1024
+            chunk_size = 1024 * 1024
+            read_so_far = 0
+            
+            with open(dev_id, "rb") as fin, open(out_path, "wb") as fout:
+                while read_so_far < bytes_to_read:
+                    data = fin.read(chunk_size)
+                    if not data:
+                        break
+                    fout.write(data)
+                    read_so_far += len(data)
+                    prog.set(read_so_far / bytes_to_read)
+            
+            self.after(0, lambda: dlg.destroy())
+            self.after(0, lambda: self.log(f"Successfully captured {mb}MB from {dev_id} to evidence.img", "ok"))
+            self.after(0, lambda: self.load_disk_image(path=out_path))
+            
+        except PermissionError:
+            self.after(0, lambda: messagebox.showerror("Permission Denied", "You MUST run this Python script as Administrator to read raw physical drives!"))
+            self.after(0, lambda: dlg.destroy())
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Error", f"Capture failed:\n{e}"))
+            self.after(0, lambda: dlg.destroy())
+
 
     # ── Sector Map Click -> Jump Hex View ────────────────────────────
     def _on_map_click(self, event):
