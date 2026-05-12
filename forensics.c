@@ -82,6 +82,16 @@ static const unsigned char GIF_HEADER[] = {0x47, 0x49, 0x46, 0x38};
 static const unsigned char GIF_FOOTER[] = {0x00, 0x3B};
 #define GIF_FTR_LEN 2
 
+/* -- ZIP: starts with PK\x03\x04 and ends with EOCD (PK\x05\x06) + 18 bytes -- */
+static const unsigned char ZIP_HEADER[] = {0x50, 0x4B, 0x03, 0x04};
+#define ZIP_HDR_LEN 4
+static const unsigned char ZIP_FOOTER[] = {0x50, 0x4B, 0x05, 0x06};
+#define ZIP_FTR_LEN 4
+
+/* -- MP4: starts with 'ftyp' at offset 4. No standard footer, so we use a size heuristic -- */
+static const unsigned char MP4_HEADER[] = {0x66, 0x74, 0x79, 0x70};
+#define MP4_HDR_LEN 4
+
 
 /* types of files we can carve - used internally to track state */
 typedef enum {
@@ -89,7 +99,9 @@ typedef enum {
     FTYPE_JPEG,
     FTYPE_PNG,
     FTYPE_PDF,
-    FTYPE_GIF
+    FTYPE_GIF,
+    FTYPE_ZIP,
+    FTYPE_MP4
 } FileType;
 
 /* just a helper to get the string name for printing */
@@ -99,6 +111,8 @@ static const char* ftype_name(FileType t) {
         case FTYPE_PNG:  return "PNG";
         case FTYPE_PDF:  return "PDF";
         case FTYPE_GIF:  return "GIF";
+        case FTYPE_ZIP:  return "ZIP";
+        case FTYPE_MP4:  return "MP4";
         default:         return "UNKNOWN";
     }
 }
@@ -110,6 +124,8 @@ static const char* ftype_ext(FileType t) {
         case FTYPE_PNG:  return "png";
         case FTYPE_PDF:  return "pdf";
         case FTYPE_GIF:  return "gif";
+        case FTYPE_ZIP:  return "zip";
+        case FTYPE_MP4:  return "mp4";
         default:         return "bin";
     }
 }
@@ -388,6 +404,39 @@ static int scan_disk(const char *image_path, const char *output_dir)
                     continue;
                 }
 
+                /* check for ZIP: 50 4B 03 04 (PK..) */
+                if (match_bytes(p, remaining, ZIP_HEADER, ZIP_HDR_LEN)) {
+                    active_type = FTYPE_ZIP;
+                    carve_len = 0;
+                    carve_start = offset + (long)i;
+
+                    printf("FOUND_START: 0x%lX\n", carve_start);
+                    printf("FOUND_TYPE: ZIP\n");
+                    fflush(stdout);
+
+                    memcpy(carve_buf, p, ZIP_HDR_LEN);
+                    carve_len = ZIP_HDR_LEN;
+                    i += ZIP_HDR_LEN - 1;
+                    continue;
+                }
+
+                /* check for MP4: 'ftyp' starts at byte 4 */
+                if (remaining >= 8 && match_bytes(p + 4, remaining - 4, MP4_HEADER, MP4_HDR_LEN)) {
+                    active_type = FTYPE_MP4;
+                    carve_len = 0;
+                    carve_start = offset + (long)i;
+
+                    printf("FOUND_START: 0x%lX\n", carve_start);
+                    printf("FOUND_TYPE: MP4\n");
+                    fflush(stdout);
+
+                    /* copy all 8 bytes (the 4 bytes of size/offset + ftyp) */
+                    memcpy(carve_buf, p, 8);
+                    carve_len = 8;
+                    i += 7;
+                    continue;
+                }
+
             } else {
                 /* === CURRENTLY CARVING - ACCUMULATE AND LOOK FOR FOOTER === */
 
@@ -430,6 +479,22 @@ static int scan_disk(const char *image_path, const char *output_dir)
                         if (carve_len >= GIF_FTR_LEN &&
                             memcmp(carve_buf + carve_len - GIF_FTR_LEN,
                                    GIF_FOOTER, GIF_FTR_LEN) == 0) {
+                            found_end = 1;
+                        }
+                        break;
+
+                    case FTYPE_ZIP:
+                        /* ZIP footer: EOCD (PK\x05\x06) + 18 bytes */
+                        if (carve_len >= 22 &&
+                            memcmp(carve_buf + carve_len - 22,
+                                   ZIP_FOOTER, ZIP_FTR_LEN) == 0) {
+                            found_end = 1;
+                        }
+                        break;
+
+                    case FTYPE_MP4:
+                        /* MP4 has no standard footer, so we carve a fixed 1MB heuristic */
+                        if (carve_len >= 1024 * 1024) {
                             found_end = 1;
                         }
                         break;
@@ -520,7 +585,7 @@ int main(int argc, char *argv[])
     fprintf(stderr, "   The undead files, shall rise.\n");
     fprintf(stderr, "  ======================================\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "  Supported formats: JPEG, PNG, PDF\n");
+    fprintf(stderr, "  Supported formats: JPEG, PNG, PDF, GIF, ZIP, MP4\n");
     fprintf(stderr, "\n");
 
     if (argc < 2) {

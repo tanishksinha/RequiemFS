@@ -32,7 +32,7 @@ C = {
 SC = {
     "empty": (10, 14, 20), "noise": (26, 31, 44), "scanned": (16, 30, 20),
     "scanning": (0, 180, 220), "jpeg": (0, 220, 55), "header": (220, 180, 0),
-    "gif": (220, 0, 180)
+    "gif": (220, 0, 180), "zip": (180, 0, 0), "mp4": (180, 100, 0)
 }
 
 
@@ -287,7 +287,8 @@ class RequiemFSApp(ctk.CTk):
         legend_fr.pack(padx=12, pady=4, fill="x")
         legends = [("Empty", SC["empty"]), ("Noise", SC["noise"]),
                    ("Scanned", SC["scanned"]), ("JPEG/PDF", SC["jpeg"]),
-                   ("GIF Data", SC["gif"]), ("Header/Footer", SC["header"])]
+                   ("GIF", SC["gif"]), ("ZIP", SC["zip"]),
+                   ("MP4", SC["mp4"]), ("Header/Footer", SC["header"])]
         for name, rgb in legends:
             row = ctk.CTkFrame(legend_fr, fg_color="transparent")
             row.pack(fill="x", padx=8, pady=1)
@@ -557,6 +558,10 @@ class RequiemFSApp(ctk.CTk):
                         state_val = "jpeg"
                         if self.current_file_type == "GIF":
                             state_val = "gif"
+                        elif self.current_file_type == "ZIP":
+                            state_val = "zip"
+                        elif self.current_file_type == "MP4":
+                            state_val = "mp4"
                             
                         for s in range(s_start, min(s_end + 1, len(self.sector_states))):
                             self.sector_states[s] = state_val

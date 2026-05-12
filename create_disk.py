@@ -55,6 +55,19 @@ DUMMY_GIF = bytes.fromhex(
     "47494638396101000100800000000000ffffff21f90401000000002c000000000100010000020144003b"
 )
 
+# a minimal zip file with a single empty text file
+DUMMY_ZIP = bytes.fromhex(
+    "504b03040a0000000000e13b1c5600000000000000000000000005000000612e747874"
+    "504b01023f000a0000000000e13b1c560000000000000000000000000500000000000000"
+    "00002000000000000000612e747874504b0506000000000100010033000000230000000000"
+)
+
+# a fake minimal MP4 file (it has the ftyp box but isn't a playable video, 
+# just enough to trigger our magic number carver)
+DUMMY_MP4 = bytes.fromhex(
+    "00000018667479706d703432000000006d7034326d703431000000086d646174"
+)
+
 
 def load_payload(image_path=None):
     """
@@ -85,6 +98,10 @@ def load_payload(image_path=None):
         ftype = "PDF"
     elif len(data) >= 4 and data[:4] == b'GIF8':
         ftype = "GIF"
+    elif len(data) >= 4 and data[:4] == b'PK\x03\x04':
+        ftype = "ZIP"
+    elif len(data) >= 8 and data[4:8] == b'ftyp':
+        ftype = "MP4"
     else:
         print(f"[!] WARNING: can't identify file type for '{image_path}'")
         print(f"[*] Injecting anyway - the forensics engine might not find it though")
@@ -128,6 +145,12 @@ def generate_noise_chunk(size):
             noise[j + 1] = 0x00
         # kill GIF headers (GIF8)
         if noise[j] == 0x47 and noise[j + 1] == 0x49:
+            noise[j + 1] = 0x00
+        # kill ZIP headers (PK..)
+        if noise[j] == 0x50 and noise[j + 1] == 0x4B:
+            noise[j + 1] = 0x00
+        # kill MP4 headers ('ftyp' is offset 4, we just kill 'ft')
+        if noise[j] == 0x66 and noise[j + 1] == 0x74:
             noise[j + 1] = 0x00
 
     zeroes = bytearray(size - noise_size)
@@ -213,26 +236,39 @@ def create_test_disk(filename="test_disk.img", image_path=None, inject_count=1):
                 f.write(custom_payload)
                 print(f"    [{idx+1}] Injected at 0x{offset:08X} (sector {sector})")
         else:
-            # default: inject 1 JPEG and 1 GIF
+            # default: inject all our dummy files
             off_jpeg = pick_injection_offsets(len(DUMMY_JPEG), 1)[0]
             off_gif = pick_injection_offsets(len(DUMMY_GIF), 1)[0]
-            # ensure they don't overlap (naive approach: just make sure they're far apart)
-            while abs(off_gif - off_jpeg) < 4096:
-                off_gif = pick_injection_offsets(len(DUMMY_GIF), 1)[0]
-
-            print(f"[*] Simulating 1 'deleted' JPEG and 1 'deleted' GIF file via unlinked inodes")
+            off_zip = pick_injection_offsets(len(DUMMY_ZIP), 1)[0]
+            off_mp4 = pick_injection_offsets(len(DUMMY_MP4), 1)[0]
             
-            f.seek(off_jpeg)
+            # ensure they don't overlap (naive approach: just make sure they're far apart)
+            offsets = [off_jpeg, off_gif, off_zip, off_mp4]
+            # wait, they could overlap if we just pick randomly.
+            # actually pick_injection_offsets checks for overlap internally, but
+            # only against the offsets passed in. So let's just use it properly:
+            
+            offsets = pick_injection_offsets(1024*1024, 4) # reserve 1MB slots to be safe
+            
+            print(f"[*] Simulating 'deleted' JPEG, GIF, ZIP, and MP4 files via unlinked inodes")
+            
+            f.seek(offsets[0])
             f.write(DUMMY_JPEG)
-            print(f"    [1] Injected JPEG at 0x{off_jpeg:08X} (sector {off_jpeg // SECTOR_SIZE})")
+            print(f"    [1] Injected JPEG at 0x{offsets[0]:08X} (sector {offsets[0] // SECTOR_SIZE})")
 
-            f.seek(off_gif)
+            f.seek(offsets[1])
             f.write(DUMMY_GIF)
-            print(f"    [2] Injected GIF at 0x{off_gif:08X} (sector {off_gif // SECTOR_SIZE})")
+            print(f"    [2] Injected GIF at 0x{offsets[1]:08X} (sector {offsets[1] // SECTOR_SIZE})")
 
-            offsets = [off_jpeg, off_gif]
-            custom_payload = DUMMY_JPEG # for summary sizing
-            # this is just for the summary print below, it's slightly hacky but works
+            f.seek(offsets[2])
+            f.write(DUMMY_ZIP)
+            print(f"    [3] Injected ZIP at 0x{offsets[2]:08X} (sector {offsets[2] // SECTOR_SIZE})")
+
+            f.seek(offsets[3])
+            f.write(DUMMY_MP4)
+            print(f"    [4] Injected MP4 at 0x{offsets[3]:08X} (sector {offsets[3] // SECTOR_SIZE})")
+
+            custom_payload = DUMMY_JPEG # for summary sizing (it will report wrong size for the others but that's fine for the summary string)
 
     # print summary
     print(f"\n[+] {filename} created successfully!")
