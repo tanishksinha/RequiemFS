@@ -9,6 +9,8 @@ New in this version:
   - Clickable sector map: click any sector to jump the hex view there
   - Entropy display: reports Shannon entropy per sector in findings
   - FOUND_TYPE: shows whether recovered file is JPEG, PNG, or PDF
+  - Entropy Heatmap: visualizes the data density of the raw disk
+  - Go to Offset: jump directly to any hex address
 """
 import os, sys, threading, queue, subprocess, math, json, datetime, time
 import customtkinter as ctk
@@ -30,6 +32,7 @@ C = {
 SC = {
     "empty": (10, 14, 20), "noise": (26, 31, 44), "scanned": (16, 30, 20),
     "scanning": (0, 180, 220), "jpeg": (0, 220, 55), "header": (220, 180, 0),
+    "gif": (220, 0, 180)
 }
 
 
@@ -62,6 +65,7 @@ class RequiemFSApp(ctk.CTk):
         self.entropy_data = {}       # sector_num -> entropy value
         self.scan_stats = {"time": 0, "count": 0, "mb_per_sec": 0}
         self.scan_wall_start = 0    # wall clock time when scan started
+        self.map_view_mode = "normal" # "normal" or "entropy"
 
         self._build_ui()
         self._bind_shortcuts()
@@ -192,7 +196,14 @@ class RequiemFSApp(ctk.CTk):
         self.map_info = ctk.CTkLabel(hdr, text="",
                                      font=ctk.CTkFont("Consolas", 9),
                                      text_color=C["t3"])
-        self.map_info.pack(side="right")
+        self.map_info.pack(side="right", padx=10)
+
+        self.entropy_btn = ctk.CTkButton(hdr, text="Heatmap: OFF",
+                                         font=ctk.CTkFont("Consolas", 9),
+                                         width=80, height=20,
+                                         fg_color=C["bg2"], hover_color=C["border"],
+                                         command=self.toggle_heatmap)
+        self.entropy_btn.pack(side="right")
         self.map_canvas = tk.Canvas(mf, bg=C["bg0"], highlightthickness=0)
         self.map_canvas.pack(fill="both", expand=True, padx=8, pady=8)
         # clicking a sector jumps the hex viewer to that part of the disk
@@ -210,10 +221,20 @@ class RequiemFSApp(ctk.CTk):
         ctk.CTkLabel(hdr2, text="HEX DUMP",
                      font=ctk.CTkFont("Consolas", 11, "bold"),
                      text_color=C["t2"]).pack(side="left")
+        
         self.hex_offset_lbl = ctk.CTkLabel(hdr2, text="",
                                            font=ctk.CTkFont("Consolas", 9),
                                            text_color=C["t3"])
-        self.hex_offset_lbl.pack(side="right")
+        self.hex_offset_lbl.pack(side="right", padx=10)
+
+        # go to offset feature
+        self.goto_entry = ctk.CTkEntry(hdr2, width=80, height=20,
+                                       font=ctk.CTkFont("Consolas", 9),
+                                       placeholder_text="0x...")
+        self.goto_entry.pack(side="right")
+        self.goto_entry.bind("<Return>", self.go_to_offset)
+        ctk.CTkLabel(hdr2, text="Go to:", font=ctk.CTkFont("Consolas", 9),
+                     text_color=C["t3"]).pack(side="right", padx=4)
 
         hex_container = ctk.CTkFrame(hf, fg_color=C["bg0"], corner_radius=4)
         hex_container.pack(fill="both", expand=True, padx=8, pady=(4, 8))
@@ -265,8 +286,8 @@ class RequiemFSApp(ctk.CTk):
         legend_fr = ctk.CTkFrame(rp, fg_color=C["bg2"], corner_radius=6)
         legend_fr.pack(padx=12, pady=4, fill="x")
         legends = [("Empty", SC["empty"]), ("Noise", SC["noise"]),
-                   ("Scanned", SC["scanned"]), ("JPEG Data", SC["jpeg"]),
-                   ("Header/Footer", SC["header"])]
+                   ("Scanned", SC["scanned"]), ("JPEG/PDF", SC["jpeg"]),
+                   ("GIF Data", SC["gif"]), ("Header/Footer", SC["header"])]
         for name, rgb in legends:
             row = ctk.CTkFrame(legend_fr, fg_color="transparent")
             row.pack(fill="x", padx=8, pady=1)
@@ -319,12 +340,26 @@ class RequiemFSApp(ctk.CTk):
         self._render_sector_map()
 
     def _render_sector_map(self):
+        if self.map_rows == 0:
+            return
         img = Image.new("RGB", (self.map_cols, self.map_rows))
         pixels = img.load()
         for i, state in enumerate(self.sector_states):
             x = i % self.map_cols
             y = i // self.map_cols
-            pixels[x, y] = SC.get(state, SC["empty"])
+            
+            if self.map_view_mode == "entropy" and i in self.entropy_data:
+                # render heat map based on entropy
+                # 0.0 -> blue, 4.0 -> green, 8.0 -> red
+                val = self.entropy_data[i]
+                if val < 4.0:
+                    intensity = int((val / 4.0) * 255)
+                    pixels[x, y] = (0, intensity, 255 - intensity)
+                else:
+                    intensity = int(((val - 4.0) / 4.0) * 255)
+                    pixels[x, y] = (intensity, 255 - intensity, 0)
+            else:
+                pixels[x, y] = SC.get(state, SC["empty"])
         cw = self.map_canvas.winfo_width() or 600
         ch = self.map_canvas.winfo_height() or 400
         scale_x = max(1, cw // self.map_cols)
@@ -517,8 +552,14 @@ class RequiemFSApp(ctk.CTk):
                         self.found_regions.append((current_start, offset))
                         s_start = current_start // SECTOR_SIZE
                         s_end = offset // SECTOR_SIZE
+                        
+                        # choose color state based on file type
+                        state_val = "jpeg"
+                        if self.current_file_type == "GIF":
+                            state_val = "gif"
+                            
                         for s in range(s_start, min(s_end + 1, len(self.sector_states))):
-                            self.sector_states[s] = "jpeg"
+                            self.sector_states[s] = state_val
                         if s_start < len(self.sector_states):
                             self.sector_states[s_start] = "header"
                         if s_end < len(self.sector_states):
@@ -612,6 +653,41 @@ class RequiemFSApp(ctk.CTk):
         self.bind("<Control-o>", lambda e: self.load_disk_image())
         self.bind("<F5>", lambda e: self.run_scan())
         self.bind("<Control-e>", lambda e: self.export_report())
+
+    # ── Map Heatmap Toggle ───────────────────────────────────────────
+    def toggle_heatmap(self):
+        if self.map_view_mode == "normal":
+            self.map_view_mode = "entropy"
+            self.entropy_btn.configure(text="Heatmap: ON", fg_color=C["orange"])
+        else:
+            self.map_view_mode = "normal"
+            self.entropy_btn.configure(text="Heatmap: OFF", fg_color=C["bg2"])
+        self._render_sector_map()
+
+    # ── Go to Offset ─────────────────────────────────────────────────
+    def go_to_offset(self, event=None):
+        val = self.goto_entry.get().strip()
+        if not val or not self.disk_data:
+            return
+        
+        try:
+            # handle hex or decimal
+            if val.lower().startswith("0x"):
+                offset = int(val, 16)
+            else:
+                offset = int(val)
+                
+            # snap to 16-byte boundary for hex viewer alignment
+            offset = offset - (offset % 16)
+            
+            if offset >= len(self.disk_data):
+                offset = len(self.disk_data) - 1024
+                
+            self._render_hex_region(offset, 4096)
+            self.log(f"Jumped to offset 0x{offset:08X}", "info")
+            
+        except ValueError:
+            self.log(f"Invalid offset: {val}", "err")
 
     # ── Sector Map Click -> Jump Hex View ────────────────────────────
     def _on_map_click(self, event):

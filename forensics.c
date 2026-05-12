@@ -76,13 +76,20 @@ static const unsigned char PDF_HEADER[] = {0x25, 0x50, 0x44, 0x46};
 static const unsigned char PDF_FOOTER[] = {0x25, 0x25, 0x45, 0x4F, 0x46};
 #define PDF_FTR_LEN 5
 
+/* -- GIF: starts with GIF8 (47 49 46 38) and ends with 00 3B -- */
+static const unsigned char GIF_HEADER[] = {0x47, 0x49, 0x46, 0x38};
+#define GIF_HDR_LEN 4
+static const unsigned char GIF_FOOTER[] = {0x00, 0x3B};
+#define GIF_FTR_LEN 2
+
 
 /* types of files we can carve - used internally to track state */
 typedef enum {
     FTYPE_NONE = 0,
     FTYPE_JPEG,
     FTYPE_PNG,
-    FTYPE_PDF
+    FTYPE_PDF,
+    FTYPE_GIF
 } FileType;
 
 /* just a helper to get the string name for printing */
@@ -91,6 +98,7 @@ static const char* ftype_name(FileType t) {
         case FTYPE_JPEG: return "JPEG";
         case FTYPE_PNG:  return "PNG";
         case FTYPE_PDF:  return "PDF";
+        case FTYPE_GIF:  return "GIF";
         default:         return "UNKNOWN";
     }
 }
@@ -101,6 +109,7 @@ static const char* ftype_ext(FileType t) {
         case FTYPE_JPEG: return "jpg";
         case FTYPE_PNG:  return "png";
         case FTYPE_PDF:  return "pdf";
+        case FTYPE_GIF:  return "gif";
         default:         return "bin";
     }
 }
@@ -363,6 +372,22 @@ static int scan_disk(const char *image_path, const char *output_dir)
                     continue;
                 }
 
+                /* check for GIF: 47 49 46 38 (GIF8) */
+                if (match_bytes(p, remaining, GIF_HEADER, GIF_HDR_LEN)) {
+                    active_type = FTYPE_GIF;
+                    carve_len = 0;
+                    carve_start = offset + (long)i;
+
+                    printf("FOUND_START: 0x%lX\n", carve_start);
+                    printf("FOUND_TYPE: GIF\n");
+                    fflush(stdout);
+
+                    memcpy(carve_buf, p, GIF_HDR_LEN);
+                    carve_len = GIF_HDR_LEN;
+                    i += GIF_HDR_LEN - 1;
+                    continue;
+                }
+
             } else {
                 /* === CURRENTLY CARVING - ACCUMULATE AND LOOK FOR FOOTER === */
 
@@ -396,6 +421,15 @@ static int scan_disk(const char *image_path, const char *output_dir)
                         if (carve_len >= PDF_FTR_LEN &&
                             memcmp(carve_buf + carve_len - PDF_FTR_LEN,
                                    PDF_FOOTER, PDF_FTR_LEN) == 0) {
+                            found_end = 1;
+                        }
+                        break;
+
+                    case FTYPE_GIF:
+                        /* GIF footer: 00 3B */
+                        if (carve_len >= GIF_FTR_LEN &&
+                            memcmp(carve_buf + carve_len - GIF_FTR_LEN,
+                                   GIF_FOOTER, GIF_FTR_LEN) == 0) {
                             found_end = 1;
                         }
                         break;

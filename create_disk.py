@@ -50,6 +50,11 @@ DUMMY_JPEG = bytes.fromhex(
     "d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00f9fe8a28a00fffd9"
 )
 
+# a tiny valid 1x1 GIF (just a transparent pixel)
+DUMMY_GIF = bytes.fromhex(
+    "47494638396101000100800000000000ffffff21f90401000000002c000000000100010000020144003b"
+)
+
 
 def load_payload(image_path=None):
     """
@@ -58,8 +63,8 @@ def load_payload(image_path=None):
     Also validates that the file looks legit before we inject it.
     """
     if image_path is None:
-        print("[*] No image provided, using built-in 1x1 dummy JPEG")
-        return DUMMY_JPEG, "JPEG"
+        print("[*] No image provided, returning None. We will use defaults.")
+        return None, None
 
     image_path = os.path.abspath(image_path)
     if not os.path.isfile(image_path):
@@ -78,6 +83,8 @@ def load_payload(image_path=None):
         ftype = "PNG"
     elif len(data) >= 4 and data[:4] == b'%PDF':
         ftype = "PDF"
+    elif len(data) >= 4 and data[:4] == b'GIF8':
+        ftype = "GIF"
     else:
         print(f"[!] WARNING: can't identify file type for '{image_path}'")
         print(f"[*] Injecting anyway - the forensics engine might not find it though")
@@ -118,6 +125,9 @@ def generate_noise_chunk(size):
             noise[j + 1] = 0x00
         # kill PDF headers
         if noise[j] == 0x25 and noise[j + 1] == 0x50:
+            noise[j + 1] = 0x00
+        # kill GIF headers (GIF8)
+        if noise[j] == 0x47 and noise[j + 1] == 0x49:
             noise[j + 1] = 0x00
 
     zeroes = bytearray(size - noise_size)
@@ -173,7 +183,10 @@ def create_test_disk(filename="test_disk.img", image_path=None, inject_count=1):
     is still sitting in the unallocated blocks, waiting to be found
     by someone running a forensic carving tool.
     """
-    payload, ftype = load_payload(image_path)
+    custom_payload = None
+    custom_type = None
+    if image_path:
+        custom_payload, custom_type = load_payload(image_path)
 
     print(f"[*] Creating {DISK_SIZE / 1024 / 1024:.0f}MB test disk: {filename}")
 
@@ -190,26 +203,43 @@ def create_test_disk(filename="test_disk.img", image_path=None, inject_count=1):
     print()  # newline after progress
 
     # step 2: pick where to inject our "deleted" files
-    offsets = pick_injection_offsets(len(payload), inject_count)
-
-    # step 3: inject the payload at each offset
-    # we use r+b mode so we overwrite specific positions
-    # without destroying the rest of the disk data
-    print(f"[*] Simulating {len(offsets)} 'deleted' {ftype} file(s) via unlinked inodes")
-
     with open(filename, "r+b") as f:
-        for idx, offset in enumerate(offsets):
-            sector = offset // SECTOR_SIZE
-            f.seek(offset)
-            f.write(payload)
-            print(f"    [{idx+1}] Injected at 0x{offset:08X} (sector {sector})")
+        if custom_payload:
+            offsets = pick_injection_offsets(len(custom_payload), inject_count)
+            print(f"[*] Simulating {len(offsets)} 'deleted' {custom_type} file(s) via unlinked inodes")
+            for idx, offset in enumerate(offsets):
+                sector = offset // SECTOR_SIZE
+                f.seek(offset)
+                f.write(custom_payload)
+                print(f"    [{idx+1}] Injected at 0x{offset:08X} (sector {sector})")
+        else:
+            # default: inject 1 JPEG and 1 GIF
+            off_jpeg = pick_injection_offsets(len(DUMMY_JPEG), 1)[0]
+            off_gif = pick_injection_offsets(len(DUMMY_GIF), 1)[0]
+            # ensure they don't overlap (naive approach: just make sure they're far apart)
+            while abs(off_gif - off_jpeg) < 4096:
+                off_gif = pick_injection_offsets(len(DUMMY_GIF), 1)[0]
+
+            print(f"[*] Simulating 1 'deleted' JPEG and 1 'deleted' GIF file via unlinked inodes")
+            
+            f.seek(off_jpeg)
+            f.write(DUMMY_JPEG)
+            print(f"    [1] Injected JPEG at 0x{off_jpeg:08X} (sector {off_jpeg // SECTOR_SIZE})")
+
+            f.seek(off_gif)
+            f.write(DUMMY_GIF)
+            print(f"    [2] Injected GIF at 0x{off_gif:08X} (sector {off_gif // SECTOR_SIZE})")
+
+            offsets = [off_jpeg, off_gif]
+            custom_payload = DUMMY_JPEG # for summary sizing
+            # this is just for the summary print below, it's slightly hacky but works
 
     # print summary
     print(f"\n[+] {filename} created successfully!")
     print(f"[+] {len(offsets)} unlinked inode(s) planted")
     for offset in offsets:
-        end = offset + len(payload)
-        print(f"    Target: 0x{offset:08X} -> 0x{end:08X} ({len(payload)} bytes)")
+        end = offset + len(custom_payload)
+        print(f"    Target: 0x{offset:08X} -> 0x{end:08X} ({len(custom_payload)} bytes)")
 
 
 def print_usage():
