@@ -212,6 +212,13 @@ class RequiemFSApp(ctk.CTk):
                                          fg_color=C["bg2"], hover_color=C["border"],
                                          command=self.toggle_heatmap)
         self.entropy_btn.pack(side="right")
+        
+        self.zoom_btn = ctk.CTkButton(hdr, text="🔍 Full View",
+                                      font=ctk.CTkFont("Consolas", 9),
+                                      width=80, height=20,
+                                      fg_color=C["bg2"], hover_color=C["border"],
+                                      command=self.open_full_map)
+        self.zoom_btn.pack(side="right", padx=5)
         self.map_canvas = tk.Canvas(mf, bg=C["bg0"], highlightthickness=0)
         self.map_canvas.pack(fill="both", expand=True, padx=8, pady=8)
         # clicking a sector jumps the hex viewer to that part of the disk
@@ -677,6 +684,72 @@ class RequiemFSApp(ctk.CTk):
             self.map_view_mode = "normal"
             self.entropy_btn.configure(text="Heatmap: OFF", fg_color=C["bg2"])
         self._render_sector_map()
+
+    # ── Full Map Pop-out ─────────────────────────────────────────────
+    def open_full_map(self):
+        if not self.disk_data:
+            return
+            
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("RequiemFS - Full Physical Sector Map")
+        dlg.geometry("1000x700")
+        
+        # Container for scrollbars
+        fr = ctk.CTkFrame(dlg, fg_color=C["bg0"])
+        fr.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        canvas = tk.Canvas(fr, bg=C["bg0"], highlightthickness=0)
+        hbar = tk.Scrollbar(fr, orient="horizontal", command=canvas.xview)
+        vbar = tk.Scrollbar(fr, orient="vertical", command=canvas.yview)
+        canvas.configure(xscrollcommand=hbar.set, yscrollcommand=vbar.set)
+        
+        hbar.pack(side="bottom", fill="x")
+        vbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        # larger scale for pop-out
+        scale = 8 
+        img_w = self.map_cols * scale
+        img_h = self.map_rows * scale
+        
+        img = Image.new("RGB", (self.map_cols, self.map_rows))
+        pixels = img.load()
+        for i, state in enumerate(self.sector_states):
+            x = i % self.map_cols
+            y = i // self.map_cols
+            if self.map_view_mode == "entropy" and i in self.entropy_data:
+                val = self.entropy_data[i]
+                if val < 4.0:
+                    intensity = int((val / 4.0) * 255)
+                    pixels[x, y] = (0, intensity, 255 - intensity)
+                else:
+                    intensity = int(((val - 4.0) / 4.0) * 255)
+                    pixels[x, y] = (intensity, 255 - intensity, 0)
+            else:
+                pixels[x, y] = SC.get(state, SC["empty"])
+                
+        img = img.resize((img_w, img_h), Image.NEAREST)
+        img_tk = ImageTk.PhotoImage(img)
+        
+        # keep reference so it's not garbage collected
+        canvas.image = img_tk 
+        canvas.create_image(0, 0, image=img_tk, anchor="nw")
+        canvas.configure(scrollregion=(0, 0, img_w, img_h))
+        
+        def on_click(event):
+            # map click in full view
+            mx = canvas.canvasx(event.x)
+            my = canvas.canvasy(event.y)
+            sx = int(mx // scale)
+            sy = int(my // scale)
+            idx = sy * self.map_cols + sx
+            if 0 <= idx < self.num_sectors:
+                self._render_hex_region(idx * SECTOR_SIZE)
+                self.log(f"Jumped to sector {idx} via Full Map View", "info")
+
+        canvas.bind("<Button-1>", on_click)
+        ctk.CTkLabel(dlg, text="Scroll to explore physical surface | Click sector to inspect in main window", 
+                     font=ctk.CTkFont("Consolas", 10), text_color=C["t2"]).pack(pady=5)
 
     # ── Go to Offset ─────────────────────────────────────────────────
     def go_to_offset(self, event=None):
