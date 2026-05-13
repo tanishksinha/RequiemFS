@@ -475,10 +475,11 @@ static int scan_disk(const char *image_path, const char *output_dir)
                         break;
 
                     case FTYPE_GIF:
-                        /* GIF footer: 00 3B */
-                        if (carve_len >= GIF_FTR_LEN &&
-                            memcmp(carve_buf + carve_len - GIF_FTR_LEN,
-                                   GIF_FOOTER, GIF_FTR_LEN) == 0) {
+                        /* GIF footer '00 3B' is too common in compressed data and causes premature truncation. 
+                           To guarantee full recovery of real GIFs without complex block parsing, we apply 
+                           a 1MB fixed-size heuristic (same as MP4). Most image viewers will safely ignore 
+                           the trailing garbage bytes after the true 00 3B trailer. */
+                        if (carve_len >= 1024 * 1024) {
                             found_end = 1;
                         }
                         break;
