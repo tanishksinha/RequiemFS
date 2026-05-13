@@ -779,9 +779,10 @@ class RequiemFSApp(ctk.CTk):
     # ── Physical Drive Capture ───────────────────────────────────────
     def open_capture_dialog(self):
         try:
-            # use wmic to get physical drives on windows
-            out = subprocess.check_output(['wmic', 'diskdrive', 'get', 'DeviceID,Model,Size'], 
-                                          text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            # wmic is deprecated on Windows 11, use powershell Get-CimInstance instead
+            cmd = ['powershell', '-NoProfile', '-Command', 
+                   'Get-CimInstance Win32_DiskDrive | Select-Object DeviceID, Model, Size | ConvertTo-Csv -NoTypeInformation']
+            out = subprocess.check_output(cmd, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to list drives. Are you on Windows?\n{e}")
             return
@@ -792,12 +793,17 @@ class RequiemFSApp(ctk.CTk):
             return
             
         drives = []
+        # parse CSV output (e.g. "\\.\PHYSICALDRIVE0","Model","Size")
         for line in lines[1:]:
-            parts = line.split()
-            # wmic output varies, but usually DeviceID is \\.\PHYSICALDRIVEx
-            dev_id = [p for p in parts if p.startswith('\\\\.\\PHYSICALDRIVE')]
-            if dev_id:
-                drives.append(line)
+            parts = [p.strip('"') for p in line.split('","')]
+            if len(parts) >= 3 and parts[0].startswith(r'\\.\PHYSICALDRIVE'):
+                dev_id = parts[0]
+                model = parts[1]
+                try:
+                    size_gb = int(parts[2]) / (1024**3)
+                    drives.append(f"{dev_id} - {model} ({size_gb:.1f} GB)")
+                except ValueError:
+                    drives.append(f"{dev_id} - {model}")
         
         if not drives:
             messagebox.showerror("Error", "No physical drives detected.")
@@ -827,8 +833,8 @@ class RequiemFSApp(ctk.CTk):
         def start_capture():
             try:
                 mb = int(mb_var.get())
-                dev_id = [p for p in drive_var.get().split() if p.startswith('\\\\.\\PHYSICALDRIVE')][0]
-            except:
+                dev_id = drive_var.get().split(' - ')[0].strip()
+            except Exception:
                 return
             
             btn.configure(state="disabled", text="Capturing...")
