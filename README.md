@@ -1,7 +1,7 @@
 # RequiemFS
 > *The undead files, shall rise.*
 
-A **Raw Disk Forensic Recovery Visualizer** — an educational OS simulator demonstrating File-System Implementation concepts from Silberschatz's *Operating System Concepts* (Chapter 12).
+A **Raw Disk Forensic Recovery Visualizer**  an educational OS simulator demonstrating File-System Implementation concepts from Silberschatz's *Operating System Concepts* (Chapter 12).
 
 ## What It Does
 
